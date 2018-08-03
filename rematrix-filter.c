@@ -35,6 +35,7 @@ struct rematrix_data {
 	double gain[MAX_AV_PLANES];
 	//store a temporary buffer
 	uint8_t *tmpbuffer[MAX_AV_PLANES];
+	bool polarity[MAX_AV_PLANES];
 
 	//initialize once, optimize for fast use
 	volatile long long _route[MAX_AV_PLANES];
@@ -67,8 +68,10 @@ static void rematrix_update(void *data, obs_data_t *settings) {
 
 	bool route_changed = false;
 	bool gain_changed = false;
+	bool polarity_changed = false;
 	long route[MAX_AV_PLANES];
 	double gain[MAX_AV_PLANES];
+	bool polarity[MAX_AV_PLANES];
 
 	//make enough space for c strings
 	int pad_digits = (int)floor(log10(abs(MAX_AV_PLANES))) + 1;
@@ -83,6 +86,11 @@ static void rematrix_update(void *data, obs_data_t *settings) {
 	size_t gain_len = strlen(gain_name_format) + pad_digits;
 	char* gain_name = (char *)calloc(gain_len, sizeof(char));
 
+	//templaate out reverse polarity format
+	const char* polarity_name_format = "polarity %i"
+	size_t polarity_len = strlen(polarity_name_format) + pad_digits;
+	char* polarity_name = (char *)calloc(polarity_len, sizeof(char));
+
 	//copy the routing over from the settings
 	for (long long i = 0; i < MAX_AV_PLANES; i++) {
 		sprintf(route_name, route_name_format, i);
@@ -90,8 +98,8 @@ static void rematrix_update(void *data, obs_data_t *settings) {
 
 		route[i] = (int)obs_data_get_int(settings, route_name);
 		gain[i] = (float)obs_data_get_double(settings, gain_name);
-
 		gain[i] = db_to_mul(gain[i]);
+		polarity[i] = (bool)obs_data_get_bool(settings, polarity_name);
 
 		if (rematrix->route[i] != route[i]) {
 			rematrix->route[i] = route[i];
@@ -101,11 +109,16 @@ static void rematrix_update(void *data, obs_data_t *settings) {
 			rematrix->gain[i] = gain[i];
 			gain_changed = true;
 		}
+		if (rematrix->polarity[i] != polarity[i]) {
+			rematrix->polarity[i] = polarity[i];
+			polarity_changed = true;
+		}
 	}
 
 	//don't memory leak
 	free(route_name);
 	free(gain_name);
+	free(polarity_name);
 }
 
 /*****************************************************************************/
@@ -134,7 +147,7 @@ static struct obs_audio_data *rematrix_filter_audio(void *data,
 	//prevent race condition
 	for (size_t c = 0; c < channels; c++) {
 		rematrix->_route[c] = rematrix->route[c];
-		rematrix->_gain[c] = rematrix->gain[c];
+		rematrix->_gain[c] = rematrix->gain[c] * (rematrix->polarity[c] * -1.0);
 	}
 
 	uint32_t frames = audio->frames;
@@ -190,13 +203,20 @@ static void rematrix_defaults(obs_data_t *settings)
 	size_t gain_len = strlen(gain_name_format) + pad_digits;
 	char* gain_name = (char *)calloc(gain_len, sizeof(char));
 
+	//templaate out reverse polarity format
+	const char* polarity_name_format = "polarity %i"
+	size_t polarity_len = strlen(polarity_name_format) + pad_digits;
+	char* polarity_name = (char *)calloc(polarity_len, sizeof(char));
+
 	//default is no routing (ordered) -1 or any out of bounds is mute*
 	for (long long i = 0; i < MAX_AV_PLANES; i++) {
 		sprintf(route_name, route_name_format, i);
 		sprintf(gain_name, gain_name_format, i);
+		sprintf(polarity_name, polarity_name_format, i);
 
 		obs_data_set_default_int(settings, route_name, i);
 		obs_data_set_default_double(settings, gain_name, 0.0);
+		obs_data_set_default_bool(settings, polarity_name, 0);
 	}
 
 	obs_data_set_default_string(settings, "profile_name", MT_("Default"));
@@ -265,12 +285,18 @@ static obs_properties_t *rematrix_properties(void *data)
 	size_t gain_len = strlen(gain_name_format) + pad_digits;
 	char* gain_name = (char *)calloc(gain_len, sizeof(char));
 
+	//templaate out reverse polarity format
+	const char* polarity_name_format = "polarity %i"
+	size_t polarity_len = strlen(polarity_name_format) + pad_digits;
+	char* polarity_name = (char *)calloc(polarity_len, sizeof(char));
+
 	//add an appropriate # of options to mix from
 	for (size_t i = 0; i < channels; i++) {
 		sprintf(route_name, route_name_format, i);
 		sprintf(gain_name, gain_name_format, i);
-
 		sprintf(route_obs, route_obs_format, i);
+		sprintf(polarity_name, polarity_name_format, i);
+
 		route[i] = obs_properties_add_list(props, route_name,
 			MT_(route_obs), OBS_COMBO_TYPE_LIST,
 			OBS_COMBO_FORMAT_INT);
@@ -283,12 +309,15 @@ static obs_properties_t *rematrix_properties(void *data)
 
 		gain[i] = obs_properties_add_float_slider(props, gain_name,
 			MT_("Gain.GainDB"), -30.0, 30.0, 0.1);
+		
+		obs_properties_add_bool(props, polarity_name, MT_("Invert.Polarity"));
 	}
 
 	//don't memory leak
 	free(gain_name);
 	free(route_name);
 	free(route_obs);
+	free(polarity_name);	
 
 	return props;
 }
